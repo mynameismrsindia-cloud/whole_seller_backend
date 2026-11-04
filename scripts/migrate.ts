@@ -20,7 +20,7 @@ async function main(): Promise<void> {
         applied_at timestamptz NOT NULL DEFAULT now()
       )
     `);
-    const directory = join(__dirname, '..', 'migrations');
+    const directory = join(process.cwd(), 'migrations');
     const files = (await readdir(directory))
       .filter((name) => name.endsWith('.sql'))
       .sort();
