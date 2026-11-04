@@ -7,9 +7,10 @@ self-contained GitHub repository root for `whole_seller_backend`.
 
 1. Create a Railway project and add a PostgreSQL service. The `Postgres` name in
    Railway variable references must match the database service's exact name.
-2. Deploy this repository as a separate Railway service. Railway builds the
-   included Dockerfile, applies pending SQL migrations at startup, and exposes
-   the API on Railway's injected `PORT`.
+2. Deploy this repository as a separate Node.js service. Railway detects
+   `package.json`, installs dependencies, and runs the build script. The start
+   command applies pending SQL migrations before starting the API on Railway's
+   injected `PORT`. No Dockerfile or container setup is needed.
 3. Add these variables to the API service:
 
    ```text
