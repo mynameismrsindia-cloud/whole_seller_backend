@@ -127,6 +127,27 @@ export class AuthService {
     }
   }
 
+  async registerOwner(input: RegisterDto) {
+    const email = input.email.trim().toLowerCase();
+    const passwordHash = await argon2.hash(input.password, {
+      type: argon2.argon2id,
+    });
+    try {
+      const { rows } = await this.database.query(
+        `INSERT INTO users (email, password_hash, name, role)
+         VALUES ($1, $2, $3, 'owner')
+         RETURNING id, email, name, role, store_name, contact, location`,
+        [email, passwordHash, input.name.trim()],
+      );
+      return this.createSession(publicUser(rows[0]));
+    } catch (error) {
+      if ((error as { code?: string }).code === '23505') {
+        throw new UnauthorizedException('Unable to register with those details.');
+      }
+      throw error;
+    }
+  }
+
   async login(input: LoginDto) {
     const { rows } = await this.database.query(
       `SELECT id, email, name, role, store_name, contact, location, password_hash
@@ -286,6 +307,11 @@ export class AuthController {
   @Post('register')
   register(@Body() body: RegisterDto) {
     return this.auth.register(body);
+  }
+
+  @Post('register-owner')
+  registerOwner(@Body() body: RegisterDto) {
+    return this.auth.registerOwner(body);
   }
 
   @Post('login')

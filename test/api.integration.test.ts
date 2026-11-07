@@ -1,6 +1,6 @@
 import * as assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { test } from 'node:test';
 import { NestFactory } from '@nestjs/core';
@@ -30,12 +30,16 @@ const testSuite = test('API integration', { skip: !testUrl }, async (t) => {
     const schemaUrl = new URL(testUrl!);
     schemaUrl.searchParams.set('options', `-c search_path=${schema}`);
     process.env.DATABASE_URL = schemaUrl.toString();
-    const migration = await readFile(
-      resolve(process.cwd(), 'migrations/001_initial.sql'),
-      'utf8',
-    );
     const appPool = new Pool({ connectionString: process.env.DATABASE_URL });
-    await appPool.query(migration);
+    const migrationsDirectory = resolve(process.cwd(), 'migrations');
+    const migrationFiles = (await readdir(migrationsDirectory))
+      .filter((name) => name.endsWith('.sql'))
+      .sort();
+    for (const migrationFile of migrationFiles) {
+      await appPool.query(
+        await readFile(resolve(migrationsDirectory, migrationFile), 'utf8'),
+      );
+    }
     await appPool.end();
 
     app = await NestFactory.create(AppModule, { logger: false });
@@ -105,6 +109,28 @@ const testSuite = test('API integration', { skip: !testUrl }, async (t) => {
     });
     assert.equal(forbiddenRole.status, 400);
 
+    const database = app!.get(Database);
+    const ownerEmail = `registered-owner-${unique}@example.test`;
+    const ownerRegistration = await request('/auth/register-owner', {
+      method: 'POST',
+      body: {
+        name: 'Registered Owner',
+        email: ownerEmail,
+        password: 'owner-password-123',
+      },
+    });
+    assert.equal(ownerRegistration.status, 201);
+    assert.equal(ownerRegistration.body.user.role, 'owner');
+    const duplicateOwnerRegistration = await request('/auth/register-owner', {
+      method: 'POST',
+      body: {
+        name: 'Duplicate Owner',
+        email: ownerEmail,
+        password: 'owner-password-456',
+      },
+    });
+    assert.equal(duplicateOwnerRegistration.status, 401);
+
     const badLogin = await request('/auth/login', {
       method: 'POST',
       body: { email: sellerEmail, password: 'incorrect-password' },
@@ -120,19 +146,21 @@ const testSuite = test('API integration', { skip: !testUrl }, async (t) => {
     const sellerUserId = sellerLogin.body.user.id as string;
 
     const argon2 = await import('argon2');
-    const ownerEmail = `owner-${unique}@example.test`;
+    const provisionedOwnerEmail = `owner-${unique}@example.test`;
     const ownerHash = await argon2.hash('owner-password-12345', {
       type: argon2.argon2id,
     });
-    const database = app!.get(Database);
     await database.query(
       `INSERT INTO users (email, password_hash, name, role)
        VALUES ($1, $2, 'Test Owner', 'owner')`,
-      [ownerEmail, ownerHash],
+      [provisionedOwnerEmail, ownerHash],
     );
     const ownerLogin = await request('/auth/login', {
       method: 'POST',
-      body: { email: ownerEmail, password: 'owner-password-12345' },
+      body: {
+        email: provisionedOwnerEmail,
+        password: 'owner-password-12345',
+      },
     });
     assert.equal(ownerLogin.status, 200);
     assert.equal(ownerLogin.body.user.role, 'owner');
