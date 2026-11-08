@@ -20,6 +20,11 @@ import { Database } from './database';
 import { decodeCursor, pageSize, paginated } from './pagination';
 
 class CreateProductDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  id?: string;
+
   @IsString()
   @MinLength(1)
   @MaxLength(160)

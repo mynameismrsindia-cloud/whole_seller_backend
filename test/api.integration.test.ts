@@ -186,7 +186,9 @@ const testSuite = test('API integration', { skip: !testUrl }, async (t) => {
       token: ownerToken,
       body: { id: 'CUSTOM1', name: 'Caller Assigned ID', quantity: 1 },
     });
-    assert.equal(callerAssignedProductId.status, 400);
+    assert.equal(callerAssignedProductId.status, 201);
+    assert.match(callerAssignedProductId.body.id, /^[0-9A-F]{6}$/);
+    assert.notEqual(callerAssignedProductId.body.id, 'CUSTOM1');
 
     const firstKey = randomUUID();
     const saleBody = {
