@@ -173,13 +173,20 @@ const testSuite = test('API integration', { skip: !testUrl }, async (t) => {
     });
     assert.equal(sellerProductWrite.status, 403);
 
-    const productId = `stock-${unique}`;
     const product = await request('/products', {
       method: 'POST',
       token: ownerToken,
-      body: { id: productId, name: 'Test Rice', quantity: 5 },
+      body: { name: 'Test Rice', quantity: 5 },
     });
     assert.equal(product.status, 201);
+    const productId = product.body.id as string;
+    assert.match(productId, /^[0-9A-F]{6}$/);
+    const callerAssignedProductId = await request('/products', {
+      method: 'POST',
+      token: ownerToken,
+      body: { id: 'CUSTOM1', name: 'Caller Assigned ID', quantity: 1 },
+    });
+    assert.equal(callerAssignedProductId.status, 400);
 
     const firstKey = randomUUID();
     const saleBody = {
@@ -217,12 +224,14 @@ const testSuite = test('API integration', { skip: !testUrl }, async (t) => {
     });
     assert.equal(changedDuplicate.status, 409);
 
-    const raceProductId = `race-${unique}`;
-    await request('/products', {
+    const raceProduct = await request('/products', {
       method: 'POST',
       token: ownerToken,
-      body: { id: raceProductId, name: 'Concurrent Rice', quantity: 3 },
+      body: { name: 'Concurrent Rice', quantity: 3 },
     });
+    assert.equal(raceProduct.status, 201);
+    const raceProductId = raceProduct.body.id as string;
+    assert.match(raceProductId, /^[0-9A-F]{6}$/);
     const concurrentBody = { ...saleBody, productId: raceProductId, quantity: 2 };
     const results = await Promise.all([
       request('/sales', {

@@ -13,17 +13,13 @@ import {
   NotFoundException,
   BadRequestException,
 } from '@nestjs/common';
+import { randomBytes } from 'node:crypto';
 import { IsBoolean, IsInt, IsOptional, IsString, Max, MaxLength, Min, MinLength } from 'class-validator';
 import { AuthGuard, AuthUser, CurrentUser, Roles, RolesGuard } from './auth';
 import { Database } from './database';
 import { decodeCursor, pageSize, paginated } from './pagination';
 
 class CreateProductDto {
-  @IsString()
-  @MinLength(1)
-  @MaxLength(100)
-  id!: string;
-
   @IsString()
   @MinLength(1)
   @MaxLength(160)
@@ -108,22 +104,28 @@ export class ProductsService {
   }
 
   async create(input: CreateProductDto) {
-    const id = input.id.trim();
-    if (id.includes('/')) throw new BadRequestException('Product ID cannot contain a slash.');
-    try {
-      const { rows } = await this.database.query<ProductRow>(
-        `INSERT INTO products (id, name, quantity, active)
-         VALUES ($1, $2, $3, $4)
-         RETURNING id, name, quantity, active, created_at, updated_at`,
-        [id, input.name.trim(), input.quantity, input.active ?? true],
-      );
-      return productJson(rows[0]);
-    } catch (error) {
-      if ((error as { code?: string }).code === '23505') {
-        throw new ConflictException('Product ID already exists.');
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const id = randomBytes(3).toString('hex').toUpperCase();
+      try {
+        const { rows } = await this.database.query<ProductRow>(
+          `INSERT INTO products (id, name, quantity, active)
+           VALUES ($1, $2, $3, $4)
+           RETURNING id, name, quantity, active, created_at, updated_at`,
+          [id, input.name.trim(), input.quantity, input.active ?? true],
+        );
+        return productJson(rows[0]);
+      } catch (error) {
+        if ((error as { code?: string }).code !== '23505') throw error;
+        if (attempt === 4) {
+          throw new ConflictException(
+            'Could not generate a unique product ID. Please try again.',
+          );
+        }
       }
-      throw error;
     }
+    throw new ConflictException(
+      'Could not generate a unique product ID. Please try again.',
+    );
   }
 
   async update(id: string, input: UpdateProductDto) {
