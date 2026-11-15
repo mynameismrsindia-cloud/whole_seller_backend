@@ -98,6 +98,20 @@ const testSuite = test('API integration', { skip: !testUrl }, async (t) => {
     assert.equal(registration.status, 201);
     assert.equal(registration.body.user.role, 'seller');
 
+    const duplicateSellerRegistration = await request('/auth/register', {
+      method: 'POST',
+      body: {
+        name: 'Duplicate Seller',
+        email: sellerEmail.toUpperCase(),
+        password: 'seller-password-456',
+      },
+    });
+    assert.equal(duplicateSellerRegistration.status, 409);
+    assert.equal(
+      duplicateSellerRegistration.body.message,
+      'Email already exists. Please sign in.',
+    );
+
     const forbiddenRole = await request('/auth/register', {
       method: 'POST',
       body: {
@@ -129,7 +143,11 @@ const testSuite = test('API integration', { skip: !testUrl }, async (t) => {
         password: 'owner-password-456',
       },
     });
-    assert.equal(duplicateOwnerRegistration.status, 401);
+    assert.equal(duplicateOwnerRegistration.status, 409);
+    assert.equal(
+      duplicateOwnerRegistration.body.message,
+      'Email already exists. Please sign in.',
+    );
 
     const badLogin = await request('/auth/login', {
       method: 'POST',
@@ -273,6 +291,166 @@ const testSuite = test('API integration', { skip: !testUrl }, async (t) => {
       body: {},
     });
     assert.equal(reapproved.status, 409);
+
+    const batchProducts = await Promise.all(
+      ['Batch Rice', 'Batch Lentils'].map((name) =>
+        request('/products', {
+          method: 'POST',
+          token: ownerToken,
+          body: { name, quantity: 5 },
+        }),
+      ),
+    );
+    assert.deepEqual(
+      batchProducts.map((result) => result.status),
+      [201, 201],
+    );
+    const batchRequestId = randomUUID();
+    const batchBody = {
+      items: batchProducts.map((result) => ({
+        productId: result.body.id as string,
+        quantity: 1,
+        rate: 15,
+      })),
+      store: 'Batch Store',
+      contact: '1234567890',
+      location: 'Kolkata',
+    };
+    const batchSale = await request('/sales', {
+      method: 'POST',
+      token: sellerToken,
+      idempotencyKey: batchRequestId,
+      body: batchBody,
+    });
+    assert.equal(batchSale.status, 201);
+    assert.equal(batchSale.body.items.length, 2);
+    assert.equal(batchSale.body.totalAmount, 30);
+
+    const batchRetry = await request('/sales', {
+      method: 'POST',
+      token: sellerToken,
+      idempotencyKey: batchRequestId,
+      body: batchBody,
+    });
+    assert.equal(batchRetry.status, 201);
+    assert.deepEqual(
+      batchRetry.body.items.map((item: { id: string }) => item.id).sort(),
+      batchSale.body.items.map((item: { id: string }) => item.id).sort(),
+    );
+
+    const ownerSales = await request('/sales?limit=100', { token: ownerToken });
+    assert.equal(
+      ownerSales.body.items.filter(
+        (item: { requestId: string }) => item.requestId === batchRequestId,
+      ).length,
+      2,
+    );
+    const batchInvoice = await request(
+      `/sales/orders/${batchRequestId}`,
+      { token: ownerToken },
+    );
+    assert.equal(batchInvoice.status, 200);
+    assert.equal(batchInvoice.body.items.length, 2);
+    const sellerOrder = await request(
+      `/sales/orders/${batchRequestId}`,
+      { token: sellerToken },
+    );
+    assert.equal(sellerOrder.status, 200);
+    assert.deepEqual(
+      sellerOrder.body.items.map((item: { id: string }) => item.id).sort(),
+      batchSale.body.items.map((item: { id: string }) => item.id).sort(),
+    );
+
+    const atomicProducts = await Promise.all([
+      request('/products', {
+        method: 'POST',
+        token: ownerToken,
+        body: { name: 'Atomic available', quantity: 5 },
+      }),
+      request('/products', {
+        method: 'POST',
+        token: ownerToken,
+        body: { name: 'Atomic empty', quantity: 0 },
+      }),
+    ]);
+    assert.deepEqual(
+      atomicProducts.map((result) => result.status),
+      [201, 201],
+    );
+    const atomicRequestId = randomUUID();
+    const rejectedBatch = await request('/sales', {
+      method: 'POST',
+      token: sellerToken,
+      idempotencyKey: atomicRequestId,
+      body: {
+        items: atomicProducts.map((result) => ({
+          productId: result.body.id as string,
+          quantity: 1,
+          rate: 10,
+        })),
+        store: 'Atomic Store',
+        contact: '1234567890',
+        location: 'Kolkata',
+      },
+    });
+    assert.equal(rejectedBatch.status, 409);
+    const refreshedProducts = await request('/products?limit=100', {
+      token: ownerToken,
+    });
+    assert.equal(
+      refreshedProducts.body.items.find(
+        (item: { id: string }) => item.id === atomicProducts[0].body.id,
+      ).quantity,
+      5,
+    );
+  });
+
+  await t.test('sale requests reject more than ten products', async () => {
+    const email = `limit-${randomUUID()}@example.test`;
+    const registration = await request('/auth/register', {
+      method: 'POST',
+      body: { name: 'Limit Seller', email, password: 'seller-password-123' },
+    });
+    assert.equal(registration.status, 201);
+
+    const ownerEmail = `limit-owner-${randomUUID()}@example.test`;
+    const owner = await request('/auth/register-owner', {
+      method: 'POST',
+      body: { name: 'Limit Owner', email: ownerEmail, password: 'owner-password-123' },
+    });
+    assert.equal(owner.status, 201);
+    const ownerToken = owner.body.accessToken as string;
+    const sellerToken = registration.body.accessToken as string;
+
+    const productIds: string[] = [];
+    for (let index = 0; index < 11; index++) {
+      const product = await request('/products', {
+        method: 'POST',
+        token: ownerToken,
+        body: { name: `Limit Product ${index + 1}`, quantity: 100 },
+      });
+      assert.equal(product.status, 201);
+      productIds.push(product.body.id as string);
+    }
+
+    const response = await request('/sales', {
+      method: 'POST',
+      token: sellerToken,
+      idempotencyKey: randomUUID(),
+      body: {
+        items: productIds.map((productId) => ({
+          productId,
+          quantity: 1,
+          rate: 10,
+        })),
+        store: 'Limit Store',
+        contact: '1234567890',
+        location: 'Kolkata',
+      },
+    });
+
+    assert.equal(response.status, 400);
+    assert.match(String(response.body.message), /at most 10 products/i);
   });
 
   await t.test('refresh tokens rotate and logout revokes the session', async () => {

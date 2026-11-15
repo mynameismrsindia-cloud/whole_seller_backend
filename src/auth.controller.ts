@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  ConflictException,
   Get,
   HttpCode,
   Injectable,
@@ -120,8 +121,12 @@ export class AuthService {
       );
       return this.createSession(publicUser(rows[0]));
     } catch (error) {
-      if ((error as { code?: string }).code === '23505') {
-        throw new UnauthorizedException('Unable to register with those details.');
+      const databaseError = error as { code?: string; constraint?: string };
+      if (
+        databaseError.code === '23505' &&
+        databaseError.constraint === 'users_email_lower_uq'
+      ) {
+        throw new ConflictException('Email already exists. Please sign in.');
       }
       throw error;
     }
@@ -141,8 +146,12 @@ export class AuthService {
       );
       return this.createSession(publicUser(rows[0]));
     } catch (error) {
-      if ((error as { code?: string }).code === '23505') {
-        throw new UnauthorizedException('Unable to register with those details.');
+      const databaseError = error as { code?: string; constraint?: string };
+      if (
+        databaseError.code === '23505' &&
+        databaseError.constraint === 'users_email_lower_uq'
+      ) {
+        throw new ConflictException('Email already exists. Please sign in.');
       }
       throw error;
     }
