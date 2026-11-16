@@ -91,6 +91,7 @@ class CreateSaleDto {
 interface SaleRow {
   id: string;
   request_id: string;
+  invoice_number: string | number;
   seller_id: string;
   salesman: string;
   store: string;
@@ -110,6 +111,7 @@ function saleJson(row: SaleRow) {
   return {
     id: row.id,
     requestId: row.request_id,
+    invoiceNumber: `INV-${String(row.invoice_number).padStart(6, '0')}`,
     sellerId: row.seller_id,
     userId: row.seller_id,
     salesman: row.salesman,
@@ -175,6 +177,27 @@ export class SalesService {
           throw new BadRequestException('A Seller account is required to submit sales.');
         }
 
+        const orderResult = await client.query<{ invoice_number: string }>(
+          `INSERT INTO sales_orders (seller_id, request_id, created_at)
+           VALUES ($1, $2, now())
+           ON CONFLICT (seller_id, request_id) DO NOTHING
+           RETURNING invoice_number`,
+          [user.id, requestId],
+        );
+        const existingOrder = orderResult.rows[0]
+          ? null
+          : await client.query<{ invoice_number: string }>(
+              `SELECT invoice_number FROM sales_orders
+               WHERE seller_id = $1 AND request_id = $2`,
+              [user.id, requestId],
+            );
+        const invoiceNumber =
+          orderResult.rows[0]?.invoice_number ??
+          existingOrder?.rows[0]?.invoice_number;
+        if (!invoiceNumber) {
+          throw new Error('Could not allocate an invoice number for this order.');
+        }
+
         const createdRows: SaleRow[] = [];
         for (const item of items) {
           const stock = await client.query(
@@ -220,7 +243,10 @@ export class SalesService {
               item.quantity * item.rate,
             ],
           );
-          createdRows.push(created.rows[0]);
+          createdRows.push({
+            ...created.rows[0],
+            invoice_number: invoiceNumber,
+          });
         }
 
         createdRows.sort((left, right) =>
@@ -287,32 +313,38 @@ export class SalesService {
     const filters: string[] = [];
     if (user.role !== 'owner') {
       values.push(user.id);
-      filters.push(`seller_id = $${values.length}`);
+      filters.push(`sales.seller_id = $${values.length}`);
     }
     if (startValue) {
       const start = new Date(startValue);
       if (!Number.isFinite(start.getTime())) throw new BadRequestException('start date is invalid.');
       values.push(start.toISOString());
-      filters.push(`created_at >= $${values.length}`);
+      filters.push(`sales.created_at >= $${values.length}`);
     }
     if (endValue) {
       const end = new Date(endValue);
       if (!Number.isFinite(end.getTime())) throw new BadRequestException('end date is invalid.');
       values.push(end.toISOString());
-      filters.push(`created_at < $${values.length}`);
+      filters.push(`sales.created_at < $${values.length}`);
     }
     if (cursor) {
       values.push(cursor.createdAt, cursor.id);
-      filters.push(`(created_at, id) < ($${values.length - 1}, $${values.length})`);
+      filters.push(
+        `(sales.created_at, sales.id) < ($${values.length - 1}, $${values.length})`,
+      );
     }
     values.push(limit + 1);
     const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
     const { rows } = await this.database.query<SaleRow>(
-      `SELECT id, request_id, seller_id, salesman, store, contact, location,
-         product_id, product_name, quantity, rate, total_amount, order_status,
-         created_at, updated_at
-       FROM sales ${where}
-       ORDER BY created_at DESC, id DESC LIMIT $${values.length}`,
+      `SELECT sales.id, sales.request_id, sales.seller_id, sales.salesman,
+         sales.store, sales.contact, sales.location, sales.product_id,
+         sales.product_name, sales.quantity, sales.rate, sales.total_amount,
+         sales.order_status, sales.created_at, sales.updated_at,
+         sales_orders.invoice_number
+       FROM sales
+       JOIN sales_orders USING (seller_id, request_id)
+       ${where}
+       ORDER BY sales.created_at DESC, sales.id DESC LIMIT $${values.length}`,
       values,
     );
     return paginated(rows, limit, saleJson);
@@ -323,15 +355,18 @@ export class SalesService {
     let sellerFilter = '';
     if (user.role !== 'owner') {
       values.push(user.id);
-      sellerFilter = ` AND seller_id = $${values.length}`;
+      sellerFilter = ` AND sales.seller_id = $${values.length}`;
     }
     const { rows } = await this.database.query<SaleRow>(
-      `SELECT id, request_id, seller_id, salesman, store, contact, location,
-         product_id, product_name, quantity, rate, total_amount, order_status,
-         created_at, updated_at
+      `SELECT sales.id, sales.request_id, sales.seller_id, sales.salesman,
+         sales.store, sales.contact, sales.location, sales.product_id,
+         sales.product_name, sales.quantity, sales.rate, sales.total_amount,
+         sales.order_status, sales.created_at, sales.updated_at,
+         sales_orders.invoice_number
        FROM sales
-       WHERE request_id = $1${sellerFilter}
-       ORDER BY product_name ASC, product_id ASC`,
+       JOIN sales_orders USING (seller_id, request_id)
+       WHERE sales.request_id = $1${sellerFilter}
+       ORDER BY sales.product_name ASC, sales.product_id ASC`,
       values,
     );
     if (rows.length === 0) throw new NotFoundException('Sale order not found.');
@@ -340,11 +375,18 @@ export class SalesService {
 
   async approve(id: string) {
     const { rows } = await this.database.query<SaleRow>(
-      `UPDATE sales SET order_status = 'approved', updated_at = now()
-       WHERE id = $1 AND order_status = 'pending'
-       RETURNING id, request_id, seller_id, salesman, store, contact, location,
-         product_id, product_name, quantity, rate, total_amount, order_status,
-         created_at, updated_at`,
+      `WITH approved AS (
+         UPDATE sales SET order_status = 'approved', updated_at = now()
+         WHERE id = $1 AND order_status = 'pending'
+         RETURNING *
+       )
+       SELECT approved.id, approved.request_id, approved.seller_id,
+         approved.salesman, approved.store, approved.contact, approved.location,
+         approved.product_id, approved.product_name, approved.quantity,
+         approved.rate, approved.total_amount, approved.order_status,
+         approved.created_at, approved.updated_at, sales_orders.invoice_number
+       FROM approved
+       JOIN sales_orders USING (seller_id, request_id)`,
       [id],
     );
     if (rows[0]) return saleJson(rows[0]);
@@ -356,12 +398,59 @@ export class SalesService {
     throw new ConflictException('A sale can only be approved once.');
   }
 
+  async approveOrder(requestId: string) {
+    const rows = await this.database.transaction(async (client) => {
+      const { rows: existing } = await client.query<{
+        id: string;
+        order_status: SaleRow['order_status'];
+      }>(
+        `SELECT id, order_status FROM sales
+         WHERE request_id = $1 FOR UPDATE`,
+        [requestId],
+      );
+      if (existing.length === 0) {
+        throw new NotFoundException('Sale order not found.');
+      }
+      if (existing.some((sale) => sale.order_status !== 'pending')) {
+        throw new ConflictException('A sale order can only be approved once.');
+      }
+
+      const { rows: approved } = await client.query<SaleRow>(
+        `UPDATE sales SET order_status = 'approved', updated_at = now()
+         WHERE request_id = $1
+         RETURNING id, request_id, seller_id, salesman, store, contact,
+           location, product_id, product_name, quantity, rate, total_amount,
+           order_status, created_at, updated_at`,
+        [requestId],
+      );
+      const { rows: complete } = await client.query<SaleRow>(
+        `SELECT sales.id, sales.request_id, sales.seller_id, sales.salesman,
+           sales.store, sales.contact, sales.location, sales.product_id,
+           sales.product_name, sales.quantity, sales.rate, sales.total_amount,
+           sales.order_status, sales.created_at, sales.updated_at,
+           sales_orders.invoice_number
+         FROM sales
+         JOIN sales_orders USING (seller_id, request_id)
+         WHERE sales.id = ANY($1::uuid[])
+         ORDER BY sales.product_name ASC, sales.product_id ASC`,
+        [approved.map((sale) => sale.id)],
+      );
+      return complete;
+    });
+    return { items: rows.map(saleJson) };
+  }
+
   private async findIdempotent(sellerId: string, requestId: string) {
     const { rows } = await this.database.query<SaleRow>(
-      `SELECT id, request_id, seller_id, salesman, store, contact, location,
-         product_id, product_name, quantity, rate, total_amount, order_status,
-         created_at, updated_at
-       FROM sales WHERE seller_id = $1 AND request_id = $2 ORDER BY created_at ASC, id ASC`,
+      `SELECT sales.id, sales.request_id, sales.seller_id, sales.salesman,
+         sales.store, sales.contact, sales.location, sales.product_id,
+         sales.product_name, sales.quantity, sales.rate, sales.total_amount,
+         sales.order_status, sales.created_at, sales.updated_at,
+         sales_orders.invoice_number
+       FROM sales
+       JOIN sales_orders USING (seller_id, request_id)
+       WHERE sales.seller_id = $1 AND sales.request_id = $2
+       ORDER BY sales.created_at ASC, sales.id ASC`,
       [sellerId, requestId],
     );
     return rows;
@@ -459,5 +548,11 @@ export class SalesController {
   @Roles('owner')
   approve(@Param('id') id: string) {
     return this.sales.approve(id);
+  }
+
+  @Patch('orders/:requestId/approve')
+  @Roles('owner')
+  approveOrder(@Param('requestId') requestId: string) {
+    return this.sales.approveOrder(requestId);
   }
 }

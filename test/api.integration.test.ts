@@ -226,6 +226,7 @@ const testSuite = test('API integration', { skip: !testUrl }, async (t) => {
     assert.equal(sale.status, 201);
     assert.equal(sale.body.totalAmount, 146);
     assert.equal(sale.body.sellerId, sellerUserId);
+    assert.match(sale.body.invoiceNumber, /^INV-\d{6,}$/);
 
     const duplicate = await request('/sales', {
       method: 'POST',
@@ -325,6 +326,13 @@ const testSuite = test('API integration', { skip: !testUrl }, async (t) => {
     assert.equal(batchSale.status, 201);
     assert.equal(batchSale.body.items.length, 2);
     assert.equal(batchSale.body.totalAmount, 30);
+    assert.ok(
+      batchSale.body.items.every(
+        (item: { invoiceNumber: string }) =>
+          item.invoiceNumber === batchSale.body.items[0].invoiceNumber,
+      ),
+    );
+    assert.notEqual(batchSale.body.items[0].invoiceNumber, sale.body.invoiceNumber);
 
     const batchRetry = await request('/sales', {
       method: 'POST',
@@ -336,6 +344,12 @@ const testSuite = test('API integration', { skip: !testUrl }, async (t) => {
     assert.deepEqual(
       batchRetry.body.items.map((item: { id: string }) => item.id).sort(),
       batchSale.body.items.map((item: { id: string }) => item.id).sort(),
+    );
+    assert.ok(
+      batchRetry.body.items.every(
+        (item: { invoiceNumber: string }) =>
+          item.invoiceNumber === batchSale.body.items[0].invoiceNumber,
+      ),
     );
 
     const ownerSales = await request('/sales?limit=100', { token: ownerToken });
@@ -360,6 +374,22 @@ const testSuite = test('API integration', { skip: !testUrl }, async (t) => {
       sellerOrder.body.items.map((item: { id: string }) => item.id).sort(),
       batchSale.body.items.map((item: { id: string }) => item.id).sort(),
     );
+    const approvedBatch = await request(
+      `/sales/orders/${batchRequestId}/approve`,
+      { method: 'PATCH', token: ownerToken, body: {} },
+    );
+    assert.equal(approvedBatch.status, 200);
+    assert.equal(approvedBatch.body.items.length, 2);
+    assert.ok(
+      approvedBatch.body.items.every(
+        (item: { orderStatus: string }) => item.orderStatus === 'approved',
+      ),
+    );
+    const reapprovedBatch = await request(
+      `/sales/orders/${batchRequestId}/approve`,
+      { method: 'PATCH', token: ownerToken, body: {} },
+    );
+    assert.equal(reapprovedBatch.status, 409);
 
     const atomicProducts = await Promise.all([
       request('/products', {
